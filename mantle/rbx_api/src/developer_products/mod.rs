@@ -2,6 +2,7 @@ pub mod models;
 
 use std::path::PathBuf;
 
+use models::ListDeveloperProductsResponseV2;
 use reqwest::{header, multipart::Form};
 use serde_json::json;
 
@@ -70,40 +71,76 @@ impl RobloxApi {
     pub async fn list_developer_products(
         &self,
         experience_id: AssetId,
-        page: u32,
+        cursor: String,
     ) -> RobloxApiResult<ListDeveloperProductsResponse> {
+        println!(
+            "Fetching developer products for experience ID: {}, page: {}",
+            experience_id, cursor
+        );
+
+
         let res = self
             .csrf_token_store
             .send_request(|| async {
                 Ok(self
                     .client
-                    .get("https://apis.roblox.com/developer-products/v1/developer-products/list")
+                    .get(format!("https://apis.roblox.com/developer-products/v2/developer-products/universes/{}/creator", &experience_id))
                     .query(&[
-                        ("universeId", &experience_id.to_string()),
-                        ("page", &page.to_string()),
+                        ("cursor", &cursor.to_string()),
+                        ("limit", &"50".to_string()),
                     ]))
             })
             .await;
 
-        handle_as_json(res).await
+        let res_v2: RobloxApiResult<ListDeveloperProductsResponseV2> =  handle_as_json(res).await;
+        match res_v2 {
+            Ok(response) => {
+                let developer_products: Vec<ListDeveloperProductResponseItem> = response
+                    .developer_products_overview
+                    .into_iter()
+                    .map(|item| ListDeveloperProductResponseItem {
+                        product_id: item.product_id,
+                        developer_product_id: item.developer_product_id,
+                        name: item.name,
+                        description: item.description,
+                        icon_image_asset_id: item.icon_image_asset_id,
+                        price_in_robux: item.price_information.map_or(0, |p| p.default_price_in_robux.unwrap_or(0)),
+                    })
+                    .collect();
+                let is_final_page = response.next_page_cursor.is_none() || developer_products.len() < 50; // Assuming 50 is the limit per page
+                Ok(ListDeveloperProductsResponse {
+                    developer_products,
+                    next_page_cursor: response.next_page_cursor,
+                    final_page: is_final_page, // Assuming 50 is the limit per page
+                })
+            },
+            Err(e) => {
+                println!("Error fetching developer products: {}", e);
+                Err(e)
+            }
+        }
     }
 
     pub async fn get_all_developer_products(
         &self,
         experience_id: AssetId,
     ) -> RobloxApiResult<Vec<ListDeveloperProductResponseItem>> {
+        println!(
+            "Fetching all developer products for experience ID: {}",
+            experience_id
+        );
         let mut all_products = Vec::new();
 
-        let mut page: u32 = 1;
+        let mut cursor: String = "".to_string();
         loop {
-            let res = self.list_developer_products(experience_id, page).await?;
+            let res = self.list_developer_products(experience_id, cursor).await?;
             all_products.extend(res.developer_products);
 
             if res.final_page {
                 break;
             }
 
-            page += 1;
+            cursor = res.next_page_cursor.unwrap();
         }
 
         Ok(all_products)
